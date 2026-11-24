@@ -1,40 +1,83 @@
+# ================================================================
+# Render Blueprint Configuration (Backend API Service)
+# Repository: YashUpadhyay5/ai-invoice-extractor-and-hrms
+# ================================================================
+
 services:
-  # ================================================================
-  # Hydro Fullstack Web Service (Express API + Embedded React UI)
-  # ================================================================
+  # --------------------------------------------------------------
+  # Hydro Express REST API + WebSockets Service
+  # --------------------------------------------------------------
   - type: web
-    name: hydro-hrms-app
+    name: hydro-hrms-backend
     env: node
-    plan: starter # or free
-    region: oregon # or frankfurt, singapore, ohio
-    buildCommand: npm install --prefix backend && npm install --prefix frontend && npm run build --prefix frontend
-    startCommand: node backend/src/server.js
+    region: singapore # Closest to Supabase Mumbai (ap-south-1)
+    plan: free # Change to starter for persistent compute
+    rootDir: backend
+    buildCommand: npm install --legacy-peer-deps
+    startCommand: node src/server.js
+    healthCheckPath: /api
+    autoDeploy: true
     envVars:
+      # Core Runtime Settings
       - key: NODE_ENV
         value: production
       - key: PORT
         value: 8000
+      - key: ALLOWED_ORIGINS
+        value: '*'
+      - key: STORAGE_PATH
+        value: ./storage
+      - key: JWT_SECRET
+        value: super_secret_hrms_token_key_2026
+
+      # Supabase PostgreSQL Database (IPv4 Pooler)
       - key: DB_DIALECT
         value: postgres
       - key: DATABASE_URL
-        fromDatabase:
-          name: hydro-hrms-db
-          property: connectionString
-      - key: JWT_SECRET
-        generateValue: true
-      - key: ALLOWED_ORIGINS
-        value: '*'
+        value: postgresql://postgres.zbqgnkgtulijgrlopoke:rKd5f5MUE9UxtkIU@aws-0-ap-south-1.pooler.supabase.com:5432/postgres
       - key: DB_POOL_MAX
-        value: '10'
+        value: '20'
       - key: DB_POOL_MIN
-        value: '2'
+        value: '4'
 
-databases:
-  # ================================================================
-  # Hydro Managed PostgreSQL Database
-  # ================================================================
-  - name: hydro-hrms-db
-    databaseName: hydro_hrms
-    user: hydro_admin
-    plan: starter # or free
-    region: oregon
+      # Email Services (Resend & Gmail SMTP)
+      - key: RESEND_API_KEY
+        sync: false
+      - key: RESEND_FROM_EMAIL
+        value: Hydro HRMS <onboarding@resend.dev>
+      - key: SMTP_HOST
+        value: smtp.gmail.com
+      - key: SMTP_PORT
+        value: '465'
+      - key: SMTP_SECURE
+        value: 'true'
+      - key: SMTP_USER
+        value: hydromaterials9@gmail.com
+      - key: SMTP_PASS
+        sync: false
+      - key: SMTP_FROM_NAME
+        value: Hydro HRMS
+
+      # Meta WhatsApp Cloud API
+      - key: WHATSAPP_API_TOKEN
+        sync: false
+      - key: WHATSAPP_PHONE_NUMBER_ID
+        value: '1186350551237630'
+      - key: WHATSAPP_BUSINESS_ACCOUNT_ID
+        value: '2840257966373288'
+      - key: WHATSAPP_API_VERSION
+        value: v19.0
+      - key: WHATSAPP_ATTENDANCE_TEMPLATE_NAME
+        value: daily_attendance_summary
+
+      # RunPod Cloud GPU OCR Service
+      - key: RUNPOD_ENDPOINT_ID
+        value: u0m2cdlvx6oqht
+      - key: RUNPOD_API_KEY
+        sync: false
+      - key: OCR_API_URL
+        value: https://api.runpod.ai/v2/u0m2cdlvx6oqht/run
+
+      # Firebase Push Notifications
+      - key: FIREBASE_SERVICE_ACCOUNT
+        sync: false
