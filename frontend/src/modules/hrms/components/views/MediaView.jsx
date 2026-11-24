@@ -1,0 +1,1304 @@
+import LoadingSpinner from '../LoadingSpinner';
+import React, { useEffect, useState, useRef } from 'react';
+import { api } from '../../services/api';
+import { formatDate, getFullUrl, downloadWithWatermark } from '../../utils/helpers';
+
+export default function MediaView({ employees = [] }) {
+    // Helper to resolve up-to-date employee ID (empCode) and Employee Name
+    const getEmployeeDisplayInfo = (m) => {
+        if (!m) return { empCode: '-', empName: 'Unknown' };
+        const emp = (employees || []).find(e => 
+            (e.id && String(e.id).toLowerCase() === String(m.userId || '').toLowerCase()) ||
+            (e.empCode && String(e.empCode).toLowerCase() === String(m.userId || '').toLowerCase()) ||
+            (e.empCode && String(e.empCode).toLowerCase() === String(m.empCode || '').toLowerCase()) ||
+            (e.name && String(e.name).toLowerCase() === String(m.userName || '').toLowerCase())
+        );
+        const empCode = emp?.empCode || m.empCode || m.userId || '-';
+        const empName = emp?.name || m.userName || 'Unknown';
+        return { empCode, empName };
+    };
+
+    const cachedMedia = api.getCached('/media');
+    const [media, setMedia] = useState(() => Array.isArray(cachedMedia) ? cachedMedia : []);
+    const [clusters, setClusters] = useState(() => api.getCached('/clusters') || []);
+    const [clusterRadius, setClusterRadius] = useState(500);
+    const [loading, setLoading] = useState(() => !cachedMedia);
+    const [error, setError] = useState(false);
+    
+    // Tab Control
+    const [activeTab, setActiveTab] = useState('photos'); // 'photos' or 'clusters'
+    
+    // Photo Viewer Modal
+    const [selectedPhoto, setSelectedPhoto] = useState(null);
+
+    // Search & Filter States
+    const [searchQuery, setSearchQuery] = useState('');
+    const [fromDate, setFromDate] = useState('');
+    const [toDate, setToDate] = useState('');
+    const [selectedClusterId, setSelectedClusterId] = useState('');
+
+    // Searchable Site Dropdown States
+    const [isSiteDropdownOpen, setIsSiteDropdownOpen] = useState(false);
+    const [siteSearchQuery, setSiteSearchQuery] = useState('');
+    const siteDropdownRef = useRef(null);
+    const siteSearchInputRef = useRef(null);
+
+    // Close site dropdown when clicking outside
+    useEffect(() => {
+        const handleOutsideClick = (e) => {
+            if (siteDropdownRef.current && !siteDropdownRef.current.contains(e.target)) {
+                setIsSiteDropdownOpen(false);
+            }
+        };
+        if (isSiteDropdownOpen) {
+            document.addEventListener('mousedown', handleOutsideClick);
+            document.addEventListener('touchstart', handleOutsideClick);
+        }
+        return () => {
+            document.removeEventListener('mousedown', handleOutsideClick);
+            document.removeEventListener('touchstart', handleOutsideClick);
+        };
+    }, [isSiteDropdownOpen]);
+
+    // Pagination States
+    const [currentPage, setCurrentPage] = useState(1);
+    const itemsPerPage = 15;
+
+    // Radius Settings Save Loading
+    const [settingsLoading, setSettingsLoading] = useState(false);
+
+    // Cluster Renaming States
+    const [editingClusterId, setEditingClusterId] = useState(null);
+    const [editingClusterName, setEditingClusterName] = useState('');
+    const [renameLoading, setRenameLoading] = useState(false);
+    const [clusterSearchTerm, setClusterSearchTerm] = useState('');
+
+    // Helper to create high-visibility cluster pin icon on Leaflet map (Exact GeofenceView style)
+    const createClusterPinIcon = (clusterName, photoCount = 0, isFocused = false) => {
+        if (!window.L) return null;
+        const bg = isFocused ? '#f97316' : '#2563eb';
+        return window.L.divIcon({
+            className: 'custom-cluster-pin-icon',
+            html: `
+                <div style="
+                    display: flex;
+                    align-items: center;
+                    gap: 5px;
+                    background: ${bg};
+                    color: #ffffff;
+                    padding: 4px 10px;
+                    border-radius: 20px;
+                    font-size: 11px;
+                    font-weight: 700;
+                    box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+                    border: 2px solid #ffffff;
+                    white-space: nowrap;
+                    cursor: pointer;
+                    transform: translate(-50%, -50%);
+                    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+                ">
+                    <span style="font-size: 12px;">📍</span>
+                    <span style="max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${clusterName}</span>
+                    ${photoCount > 0 ? `
+                        <span style="
+                            background: rgba(255, 255, 255, 0.3);
+                            padding: 1px 6px;
+                            border-radius: 10px;
+                            font-size: 10px;
+                            font-weight: 800;
+                            margin-left: 2px;
+                        ">${photoCount}</span>
+                    ` : ''}
+                </div>
+            `,
+            iconSize: [110, 30],
+            iconAnchor: [55, 15]
+        });
+    };
+
+    // Map & Scroll Refs
+    const mapRef = useRef(null);
+    const mapInstance = useRef(null);
+    const clusterLayersRef = useRef({});
+    const clusterCardRefs = useRef({});
+    const [focusedClusterId, setFocusedClusterId] = useState(null);
+
+    // Fetch clusters, settings, and media
+    const fetchClustersAndSettings = async () => {
+        try {
+            const [clusterList, settingData] = await Promise.all([
+                api.getClusters(),
+                api.getClusterSettings()
+            ]);
+            setClusters(clusterList);
+            if (settingData && settingData.clusterRadius) {
+                setClusterRadius(settingData.clusterRadius);
+            }
+        } catch (err) {
+            console.error('Error fetching cluster data:', err);
+        }
+    };
+
+    const fetchMedia = async () => {
+        if (!media.length) setLoading(true);
+        try {
+            // Fetch filtered media by cluster from backend
+            const data = await api.getMedia('', selectedClusterId);
+            if (Array.isArray(data)) {
+                setMedia(data);
+                setError(false);
+            }
+        } catch (err) {
+            console.error('Error fetching media:', err);
+            if (!media.length) setError(true);
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    useEffect(() => {
+        fetchClustersAndSettings();
+    }, []);
+
+    useEffect(() => {
+        fetchMedia();
+    }, [selectedClusterId]);
+
+    // Reset pagination when filter or search changes
+    useEffect(() => {
+        setCurrentPage(1);
+    }, [searchQuery, fromDate, toDate, selectedClusterId]);
+
+    // Initialize & render map whenever activeTab is 'clusters', clusters change, or focus changes
+    useEffect(() => {
+        if (activeTab !== 'clusters') {
+            if (mapInstance.current) {
+                mapInstance.current.remove();
+                mapInstance.current = null;
+                clusterLayersRef.current = {};
+            }
+            return;
+        }
+
+        if (!mapRef.current || !window.L) return;
+
+        // Ensure Leaflet map instance exists
+        if (!mapInstance.current) {
+            // Default center Northern India / Punjab
+            mapInstance.current = window.L.map(mapRef.current, {
+                center: [31.50, 74.80],
+                zoom: 10,
+                zoomControl: true
+            });
+
+            window.L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png?key=cb1_2ae4_1_8e228ec653d025bb97ea2305', {
+                attribution: '&copy; OpenStreetMap &copy; CARTO'
+            }).addTo(mapInstance.current);
+        }
+
+        const map = mapInstance.current;
+
+        // Clear existing layers
+        Object.keys(clusterLayersRef.current).forEach(id => {
+            if (clusterLayersRef.current[id]) {
+                if (clusterLayersRef.current[id].circle) map.removeLayer(clusterLayersRef.current[id].circle);
+                if (clusterLayersRef.current[id].marker) map.removeLayer(clusterLayersRef.current[id].marker);
+            }
+        });
+        clusterLayersRef.current = {};
+
+        const validClusterCoords = [];
+
+        // Draw circles and high-visibility pins for each cluster
+        clusters.forEach(cl => {
+            const lat = Number(cl.centerLatitude);
+            const lng = Number(cl.centerLongitude);
+            if (isNaN(lat) || isNaN(lng) || lat === 0 || lng === 0) return;
+
+            const photoCount = cl.media ? cl.media.length : 0;
+            const isFocused = String(cl.id) === String(focusedClusterId);
+            const r = parseFloat(cl.radius) || clusterRadius || 200;
+
+            // 1. Geofence Circle Preview (Exact styling from GeofenceView)
+            const circleColor = isFocused ? '#f97316' : '#2563eb';
+            const circle = window.L.circle([lat, lng], {
+                radius: r,
+                color: circleColor,
+                fillColor: circleColor,
+                fillOpacity: isFocused ? 0.3 : 0.15,
+                weight: isFocused ? 3 : 1.5
+            }).addTo(map);
+
+            if (isFocused) {
+                circle.bringToFront();
+            }
+
+            // 2. High-Visibility Pin Marker (Centered at [55, 15], exact styling from GeofenceView)
+            const marker = window.L.marker([lat, lng], {
+                icon: createClusterPinIcon(cl.name, photoCount, isFocused)
+            }).addTo(map);
+
+            const popupContent = `
+                <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 13px; padding: 4px; color: #1e293b; min-width: 180px;">
+                    <div style="font-weight: 700; color: ${isFocused ? '#f97316' : '#0f172a'}; font-size: 14px; margin-bottom: 4px; display: flex; align-items: center; gap: 4px;">
+                        📍 ${cl.name} ${isFocused ? '<span style="font-size: 11px; color: #f97316;">● Active</span>' : ''}
+                    </div>
+                    <div style="color: #64748b; font-size: 11px; margin-bottom: 4px;">Coordinates: ${lat.toFixed(5)}, ${lng.toFixed(5)}</div>
+                    <div style="display: flex; justify-content: space-between; align-items: center; border-top: 1px solid #e2e8f0; padding-top: 6px; margin-top: 4px;">
+                        <span style="color: #059669; font-weight: 700; font-size: 12px;">📁 ${photoCount} Photo${photoCount !== 1 ? 's' : ''}</span>
+                        <span style="color: #2563eb; font-weight: 600; font-size: 11px;">Radius: ${r}m</span>
+                    </div>
+                </div>
+            `;
+
+            circle.bindPopup(popupContent, { minWidth: 190 });
+            marker.bindPopup(popupContent, { minWidth: 190 });
+
+            // Clicking pin or circle triggers focus and flies map directly onto location
+            marker.on('click', () => {
+                focusClusterOnMap(cl);
+            });
+            circle.on('click', () => {
+                focusClusterOnMap(cl);
+            });
+
+            clusterLayersRef.current[cl.id] = { circle, marker, lat, lng };
+
+            // Collect coordinates of clusters with media for smart bounds fitting
+            if (photoCount > 0) {
+                validClusterCoords.push([lat, lng]);
+            }
+        });
+
+        // Ensure container layout has completed before invalidateSize and bounds fitting (on first load when no cluster focused)
+        if (!focusedClusterId) {
+            requestAnimationFrame(() => {
+                setTimeout(() => {
+                    if (!mapInstance.current) return;
+                    mapInstance.current.invalidateSize();
+
+                    // Focus on operational clusters that have photos
+                    if (validClusterCoords.length > 0) {
+                        const bounds = window.L.latLngBounds(validClusterCoords);
+                        mapInstance.current.fitBounds(bounds.pad(0.25), { maxZoom: 13 });
+                    } else if (clusters.length > 0) {
+                        const firstCl = clusters[0];
+                        if (firstCl && firstCl.centerLatitude && firstCl.centerLongitude) {
+                            mapInstance.current.setView([Number(firstCl.centerLatitude), Number(firstCl.centerLongitude)], 11);
+                        }
+                    }
+                }, 180);
+            });
+        }
+
+        return () => {
+            if (activeTab !== 'clusters' && mapInstance.current) {
+                mapInstance.current.remove();
+                mapInstance.current = null;
+                clusterLayersRef.current = {};
+            }
+        };
+    }, [activeTab, clusters, focusedClusterId]);
+
+        // Local filters for search query & date range
+    let filteredMedia = media;
+    if (fromDate) {
+        const from = new Date(fromDate);
+        from.setHours(0, 0, 0, 0);
+        filteredMedia = filteredMedia.filter(m => {
+            if (!m.timestamp) return false;
+            const mDate = new Date(Number(m.timestamp) || m.timestamp);
+            return mDate >= from;
+        });
+    }
+    if (toDate) {
+        const to = new Date(toDate);
+        to.setHours(23, 59, 59, 999);
+        filteredMedia = filteredMedia.filter(m => {
+            if (!m.timestamp) return false;
+            const mDate = new Date(Number(m.timestamp) || m.timestamp);
+            return mDate <= to;
+        });
+    }
+
+    if (searchQuery.trim() !== '') {
+        const query = searchQuery.toLowerCase();
+        filteredMedia = filteredMedia.filter(m => 
+            m.userName && m.userName.toLowerCase().includes(query)
+        );
+    }
+
+    // Paginate Results
+    const totalItems = filteredMedia.length;
+    const totalPages = Math.ceil(totalItems / itemsPerPage);
+    const startIndex = (currentPage - 1) * itemsPerPage;
+    const endIndex = Math.min(startIndex + itemsPerPage, totalItems);
+    const paginatedMedia = filteredMedia.slice(startIndex, endIndex);
+
+    // Save Settings
+    const handleSaveSettings = async (e) => {
+        e.preventDefault();
+        setSettingsLoading(true);
+        try {
+            await api.updateClusterSettings(clusterRadius);
+            await fetchClustersAndSettings();
+            await fetchMedia();
+            alert('Dynamic clustering radius updated successfully! Future photo uploads will group based on this radius.');
+        } catch (err) {
+            console.error(err);
+            alert('Failed to update cluster settings.');
+        } finally {
+            setSettingsLoading(false);
+        }
+    };
+
+    const handleRenameCluster = async (clusterId) => {
+        if (!editingClusterName.trim()) {
+            alert('Cluster name cannot be empty.');
+            return;
+        }
+        setRenameLoading(true);
+        try {
+            await api.updateClusterName(clusterId, editingClusterName);
+            setEditingClusterId(null);
+            setEditingClusterName('');
+            await fetchClustersAndSettings();
+            await fetchMedia();
+        } catch (err) {
+            console.error(err);
+            alert('Failed to rename cluster.');
+        } finally {
+            setRenameLoading(false);
+        }
+    };
+
+    // Click-to-Focus map navigation helper with flying animation (Exact GeofenceView behavior)
+    const focusClusterOnMap = (cl) => {
+        if (!cl) return;
+        setFocusedClusterId(cl.id);
+        const lat = Number(cl.centerLatitude);
+        const lng = Number(cl.centerLongitude);
+
+        if (mapInstance.current && !isNaN(lat) && !isNaN(lng)) {
+            // Smooth flying swoop animation onto site location pin (duration: 1.2s, zoom: 16)
+            mapInstance.current.flyTo([lat, lng], 16, { duration: 1.2 });
+
+            setTimeout(() => {
+                const layer = clusterLayersRef.current[cl.id];
+                if (layer) {
+                    if (layer.circle) layer.circle.bringToFront();
+                    if (layer.marker) layer.marker.openPopup();
+                }
+            }, 450);
+        }
+
+        // Auto-scroll the left list to this cluster card smoothly!
+        const cardEl = clusterCardRefs.current[cl.id];
+        if (cardEl) {
+            cardEl.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        }
+    };
+
+    // Auto-Fit map to show all cluster sites across the map (Matches GeofenceView)
+    const handleFitAllClusters = () => {
+        if (!mapInstance.current || clusters.length === 0 || !window.L) return;
+        const bounds = window.L.latLngBounds();
+        let validCount = 0;
+        clusters.forEach(cl => {
+            const lat = Number(cl.centerLatitude);
+            const lng = Number(cl.centerLongitude);
+            if (!isNaN(lat) && !isNaN(lng) && lat !== 0 && lng !== 0) {
+                bounds.extend([lat, lng]);
+                validCount++;
+            }
+        });
+        if (validCount > 0) {
+            mapInstance.current.fitBounds(bounds, { padding: [60, 60], maxZoom: 15 });
+            setFocusedClusterId(null);
+        }
+    };
+
+    // Filter clusters by search term (Matches GeofenceView)
+    const filteredClusterList = clusters.filter(cl => {
+        if (!clusterSearchTerm.trim()) return true;
+        const term = clusterSearchTerm.toLowerCase();
+        return (cl.name && cl.name.toLowerCase().includes(term)) ||
+               (cl.centerLatitude && cl.centerLatitude.toString().includes(term)) ||
+               (cl.centerLongitude && cl.centerLongitude.toString().includes(term));
+    });
+
+    // Compute active site label & searchable site options for Photos Gallery filter
+    const selectedClusterObj = selectedClusterId === 'unassigned'
+        ? { id: 'unassigned', name: '⚠️ Unassigned / Out of bounds' }
+        : clusters.find(c => String(c.id) === String(selectedClusterId));
+
+    const selectedClusterLabel = selectedClusterObj
+        ? (selectedClusterId === 'unassigned' ? selectedClusterObj.name : `${selectedClusterObj.name} (${selectedClusterObj.media ? selectedClusterObj.media.length : 0} photos)`)
+        : 'All Sites';
+
+    const filteredSites = clusters.filter(cl => {
+        if (!siteSearchQuery.trim()) return true;
+        const q = siteSearchQuery.toLowerCase().trim();
+        return cl.name && cl.name.toLowerCase().includes(q);
+    });
+
+    return (
+        <div id="media-view" className="view active" style={{ height: '100%', minHeight: 0, flex: 1, display: 'flex', flexDirection: 'column', gap: '16px', overflow: 'auto' }}>
+            <div className="view-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexShrink: 0 }}>
+                <h2>Geotagged Photos & Clusters</h2>
+                
+                {/* Tab buttons */}
+                <div className="tab-btn-group" style={{ margin: 0 }}>
+                    <button 
+                        className={`tab-btn ${activeTab === 'photos' ? 'active' : ''}`} 
+                        onClick={() => setActiveTab('photos')}
+                    >
+                        <i className="fa-solid fa-images" style={{ marginRight: '6px' }}></i> Photos Gallery
+                    </button>
+                    <button 
+                        className={`tab-btn ${activeTab === 'clusters' ? 'active' : ''}`} 
+                        onClick={() => setActiveTab('clusters')}
+                    >
+                        <i className="fa-solid fa-circle-nodes" style={{ marginRight: '6px' }}></i> Site Clustering
+                    </button>
+                </div>
+            </div>
+
+            {activeTab === 'photos' && (
+                <>
+                    {/* Filters Toolbar */}
+                    <div className="glass" style={{ padding: '20px', display: 'flex', flexWrap: 'wrap', gap: '15px', alignItems: 'flex-end', justifyContent: 'space-between', flexShrink: 0 }}>
+                        <div style={{ display: 'flex', gap: '15px', alignItems: 'center', flexWrap: 'wrap' }}>
+                            <div style={{ display: 'flex', gap: '10px', alignItems: 'center', flexWrap: 'wrap' }}>
+                                {/* Searchable Site Filter Dropdown */}
+                                <div ref={siteDropdownRef} style={{ position: 'relative', display: 'flex', flexDirection: 'column', gap: '2px', minWidth: '240px', maxWidth: '320px' }}>
+                                    <span style={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--text-primary)' }}>Filter by Site</span>
+                                    <div
+                                        onClick={() => {
+                                            setIsSiteDropdownOpen(prev => {
+                                                const next = !prev;
+                                                if (next) {
+                                                    setTimeout(() => siteSearchInputRef.current?.focus(), 60);
+                                                }
+                                                return next;
+                                            });
+                                        }}
+                                        style={{
+                                            padding: '8px 12px',
+                                            borderRadius: '6px',
+                                            border: isSiteDropdownOpen ? '1px solid #3b82f6' : '1px solid var(--border-glass)',
+                                            fontSize: '0.9rem',
+                                            background: 'var(--input-bg)',
+                                            color: 'var(--text-primary)',
+                                            cursor: 'pointer',
+                                            display: 'flex',
+                                            alignItems: 'center',
+                                            justifyContent: 'space-between',
+                                            gap: '8px',
+                                            userSelect: 'none',
+                                            boxShadow: isSiteDropdownOpen ? '0 0 0 2px rgba(59, 130, 246, 0.2)' : 'none',
+                                            transition: 'all 0.15s ease',
+                                            minHeight: '38px',
+                                            boxSizing: 'border-box'
+                                        }}
+                                        title="Click to search and select a site"
+                                    >
+                                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0, flex: 1 }}>
+                                            <i className="fa-solid fa-location-dot" style={{ color: selectedClusterId ? '#3b82f6' : 'var(--text-muted)', fontSize: '0.85rem', flexShrink: 0 }}></i>
+                                            <span style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', fontWeight: selectedClusterId ? 600 : 400 }}>
+                                                {selectedClusterLabel}
+                                            </span>
+                                        </div>
+                                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexShrink: 0 }}>
+                                            {selectedClusterId && (
+                                                <span
+                                                    onClick={(e) => {
+                                                        e.stopPropagation();
+                                                        setSelectedClusterId('');
+                                                        setSiteSearchQuery('');
+                                                    }}
+                                                    title="Reset to All Sites"
+                                                    style={{
+                                                        cursor: 'pointer',
+                                                        color: 'var(--text-muted)',
+                                                        padding: '2px 4px',
+                                                        borderRadius: '4px',
+                                                        fontSize: '0.8rem',
+                                                        lineHeight: 1
+                                                    }}
+                                                    onMouseEnter={(e) => e.currentTarget.style.color = '#ef4444'}
+                                                    onMouseLeave={(e) => e.currentTarget.style.color = 'var(--text-muted)'}
+                                                >
+                                                    ✕
+                                                </span>
+                                            )}
+                                            <i className={`fa-solid fa-chevron-${isSiteDropdownOpen ? 'up' : 'down'}`} style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}></i>
+                                        </div>
+                                    </div>
+
+                                    {/* Searchable Dropdown Popover */}
+                                    {isSiteDropdownOpen && (
+                                        <div
+                                            className="site-search-dropdown-menu"
+                                            style={{
+                                                position: 'absolute',
+                                                top: 'calc(100% + 4px)',
+                                                left: 0,
+                                                width: '100%',
+                                                minWidth: '280px',
+                                                maxWidth: '360px',
+                                                borderRadius: '8px',
+                                                zIndex: 99999,
+                                                overflow: 'hidden',
+                                                display: 'flex',
+                                                flexDirection: 'column'
+                                            }}
+                                        >
+                                            {/* Search Bar Input */}
+                                            <div className="site-search-header" style={{ padding: '8px 10px', position: 'sticky', top: 0, zIndex: 2 }}>
+                                                <div className="site-search-box" style={{ display: 'flex', alignItems: 'center', gap: '8px', borderRadius: '6px', padding: '6px 10px' }}>
+                                                    <i className="fa-solid fa-magnifying-glass" style={{ color: '#94a3b8', fontSize: '0.8rem', flexShrink: 0 }}></i>
+                                                    <input
+                                                        ref={siteSearchInputRef}
+                                                        type="text"
+                                                        placeholder="Type to search site..."
+                                                        value={siteSearchQuery}
+                                                        onChange={(e) => setSiteSearchQuery(e.target.value)}
+                                                        onKeyDown={(e) => {
+                                                            if (e.key === 'Escape') {
+                                                                setIsSiteDropdownOpen(false);
+                                                            }
+                                                        }}
+                                                        style={{
+                                                            flex: 1,
+                                                            background: 'transparent',
+                                                            border: 'none',
+                                                            outline: 'none',
+                                                            fontSize: '0.85rem'
+                                                        }}
+                                                    />
+                                                    {siteSearchQuery && (
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => {
+                                                                setSiteSearchQuery('');
+                                                                siteSearchInputRef.current?.focus();
+                                                            }}
+                                                            style={{
+                                                                background: 'transparent',
+                                                                border: 'none',
+                                                                color: '#94a3b8',
+                                                                cursor: 'pointer',
+                                                                padding: 0,
+                                                                fontSize: '0.8rem',
+                                                                lineHeight: 1
+                                                            }}
+                                                        >
+                                                            ✕
+                                                        </button>
+                                                    )}
+                                                </div>
+                                            </div>
+
+                                            {/* Options List */}
+                                            <div
+                                                className="custom-scrollbar"
+                                                style={{
+                                                    maxHeight: '260px',
+                                                    overflowY: 'auto',
+                                                    padding: '4px 0'
+                                                }}
+                                            >
+                                                {/* All Sites Option */}
+                                                {(!siteSearchQuery || 'all sites'.includes(siteSearchQuery.toLowerCase())) && (
+                                                    <div
+                                                        className={`site-option-item ${selectedClusterId === '' ? 'selected' : ''}`}
+                                                        onClick={() => {
+                                                            setSelectedClusterId('');
+                                                            setIsSiteDropdownOpen(false);
+                                                            setSiteSearchQuery('');
+                                                        }}
+                                                        style={{
+                                                            padding: '8px 12px',
+                                                            cursor: 'pointer',
+                                                            display: 'flex',
+                                                            alignItems: 'center',
+                                                            justifyContent: 'space-between',
+                                                            fontSize: '0.85rem',
+                                                            transition: 'background 0.1s ease'
+                                                        }}
+                                                    >
+                                                        <span style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                                            <i className="fa-solid fa-border-all" style={{ fontSize: '0.8rem', opacity: 0.7 }}></i>
+                                                            All Sites
+                                                        </span>
+                                                        {selectedClusterId === '' && <i className="fa-solid fa-check" style={{ fontSize: '0.75rem', color: '#3b82f6' }}></i>}
+                                                    </div>
+                                                )}
+
+                                                {/* Unassigned Option */}
+                                                {(!siteSearchQuery || 'unassigned out of bounds'.includes(siteSearchQuery.toLowerCase())) && (
+                                                    <div
+                                                        className={`site-option-item ${selectedClusterId === 'unassigned' ? 'selected' : ''}`}
+                                                        onClick={() => {
+                                                            setSelectedClusterId('unassigned');
+                                                            setIsSiteDropdownOpen(false);
+                                                            setSiteSearchQuery('');
+                                                        }}
+                                                        style={{
+                                                            padding: '8px 12px',
+                                                            cursor: 'pointer',
+                                                            display: 'flex',
+                                                            alignItems: 'center',
+                                                            justifyContent: 'space-between',
+                                                            fontSize: '0.85rem',
+                                                            transition: 'background 0.1s ease'
+                                                        }}
+                                                    >
+                                                        <span style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                                            <i className="fa-solid fa-triangle-exclamation" style={{ color: '#f59e0b', fontSize: '0.8rem' }}></i>
+                                                            Unassigned / Out of bounds
+                                                        </span>
+                                                        {selectedClusterId === 'unassigned' && <i className="fa-solid fa-check" style={{ fontSize: '0.75rem', color: '#f59e0b' }}></i>}
+                                                    </div>
+                                                )}
+
+                                                {/* Matching Filtered Sites */}
+                                                {filteredSites.map(cl => {
+                                                    const isSelected = String(selectedClusterId) === String(cl.id);
+                                                    const photoCount = cl.media ? cl.media.length : 0;
+                                                    return (
+                                                        <div
+                                                            key={cl.id}
+                                                            className={`site-option-item ${isSelected ? 'selected' : ''}`}
+                                                            onClick={() => {
+                                                                setSelectedClusterId(String(cl.id));
+                                                                setIsSiteDropdownOpen(false);
+                                                                setSiteSearchQuery('');
+                                                            }}
+                                                            style={{
+                                                                padding: '8px 12px',
+                                                                cursor: 'pointer',
+                                                                display: 'flex',
+                                                                alignItems: 'center',
+                                                                justifyContent: 'space-between',
+                                                                gap: '8px',
+                                                                fontSize: '0.85rem',
+                                                                transition: 'background 0.1s ease'
+                                                            }}
+                                                        >
+                                                            <span style={{ display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0, flex: 1 }}>
+                                                                <i className="fa-solid fa-location-dot" style={{ fontSize: '0.75rem', opacity: 0.6, flexShrink: 0 }}></i>
+                                                                <span style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                                                                    {cl.name}
+                                                                </span>
+                                                            </span>
+                                                            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexShrink: 0 }}>
+                                                                <span style={{
+                                                                    fontSize: '0.72rem',
+                                                                    padding: '1px 6px',
+                                                                    borderRadius: '10px',
+                                                                    background: photoCount > 0 ? 'rgba(59, 130, 246, 0.18)' : 'rgba(148, 163, 184, 0.15)',
+                                                                    color: photoCount > 0 ? '#3b82f6' : 'var(--text-muted)',
+                                                                    fontWeight: 500
+                                                                }}>
+                                                                    {photoCount} {photoCount === 1 ? 'photo' : 'photos'}
+                                                                </span>
+                                                                {isSelected && <i className="fa-solid fa-check" style={{ fontSize: '0.75rem', color: '#3b82f6' }}></i>}
+                                                            </div>
+                                                        </div>
+                                                    );
+                                                })}
+
+                                                {/* Empty State */}
+                                                {filteredSites.length === 0 && siteSearchQuery && (
+                                                    <div style={{ padding: '20px 12px', textAlign: 'center', color: 'var(--text-muted)', fontSize: '0.85rem' }}>
+                                                        <i className="fa-solid fa-magnifying-glass" style={{ marginBottom: '6px', fontSize: '1.2rem', display: 'block', opacity: 0.5 }}></i>
+                                                        No sites matching "<b>{siteSearchQuery}</b>"
+                                                    </div>
+                                                )}
+                                            </div>
+                                        </div>
+                                    )}
+                                </div>
+                                <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
+                                    <span style={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--text-primary)' }}>From Date</span>
+                                    <input 
+                                        type="date" 
+                                        value={fromDate} 
+                                        onChange={(e) => setFromDate(e.target.value)}
+                                        style={{
+                                            padding: '8px 12px',
+                                            borderRadius: '6px',
+                                            border: '1px solid var(--border-glass)',
+                                            fontSize: '0.9rem',
+                                            outline: 'none',
+                                            background: 'var(--input-bg)',
+                                            color: 'var(--text-primary)',
+                                            colorScheme: 'dark'
+                                        }}
+                                    />
+                                </div>
+                                <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
+                                    <span style={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--text-primary)' }}>To Date</span>
+                                    <input 
+                                        type="date" 
+                                        value={toDate} 
+                                        onChange={(e) => setToDate(e.target.value)}
+                                        style={{
+                                            padding: '8px 12px',
+                                            borderRadius: '6px',
+                                            border: '1px solid var(--border-glass)',
+                                            fontSize: '0.9rem',
+                                            outline: 'none',
+                                            background: 'var(--input-bg)',
+                                            color: 'var(--text-primary)',
+                                            colorScheme: 'dark'
+                                        }}
+                                    />
+                                </div>
+                                {(fromDate || toDate || selectedClusterId) && (
+                                    <button 
+                                        className="btn"
+                                        onClick={() => { setFromDate(''); setToDate(''); setSelectedClusterId(''); setSiteSearchQuery(''); setIsSiteDropdownOpen(false); }}
+                                        style={{ alignSelf: 'flex-end', background: '#ef4444', color: 'white', padding: '8px 12px', borderRadius: '6px', cursor: 'pointer', height: '36px' }}
+                                    >
+                                        Clear Filters
+                                    </button>
+                                )}
+                            </div>
+
+                            <div className="form-group" style={{ margin: 0, minWidth: '240px' }}>
+                                <span style={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--text-primary)' }}>Employee Search</span>
+                                <input 
+                                    type="text" 
+                                    placeholder="Search by Employee Name or ID..." 
+                                    value={searchQuery}
+                                    onChange={(e) => setSearchQuery(e.target.value)}
+                                    style={{
+                                        width: '100%',
+                                        padding: '8px 12px',
+                                        borderRadius: '6px',
+                                        border: '1px solid var(--border-glass)',
+                                        background: 'var(--input-bg)',
+                                        color: 'var(--text-primary)',
+                                        fontSize: '0.9rem',
+                                        outline: 'none',
+                                        marginTop: '2px'
+                                    }}
+                                />
+                            </div>
+                        </div>
+                    </div>
+
+                    {loading ? (
+                        <LoadingSpinner message="Loading Employee Photos & Attachments..." minHeight="280px" />
+                    ) : error ? (
+                        <p className="error-text">Failed to load media list.</p>
+                    ) : paginatedMedia.length === 0 ? (
+                        <p>No photos found matching the criteria.</p>
+                    ) : (
+                        <div className="custom-scrollbar" style={{ flex: 1, minHeight: 0, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '20px', paddingRight: '4px' }}>
+                            <div id="media-grid-container" className="media-grid">
+                                {paginatedMedia.map(m => (
+                                    <div key={m.id} className="media-card" style={{ display: 'flex', flexDirection: 'column' }}>
+                                        <div style={{ position: 'relative', width: '100%', height: '200px', backgroundColor: 'var(--bg-dark)' }}>
+                                            <img loading="lazy" 
+                                                src={m.cloudinaryUrl || getFullUrl(m.filePath)} 
+                                                alt="Upload" 
+                                                onClick={() => setSelectedPhoto(m)}
+                                                style={{ cursor: 'pointer', width: '100%', height: '100%', objectFit: 'cover' }}
+                                            />
+                                            {/* Geofence Site Badge on Photo Card */}
+                                            <span style={{
+                                                position: 'absolute',
+                                                top: '10px',
+                                                left: '10px',
+                                                fontSize: '0.75rem',
+                                                fontWeight: 700,
+                                                padding: '4px 8px',
+                                                borderRadius: '12px',
+                                                backgroundColor: (m.geofence || m.site || m.cluster) ? 'rgba(79, 70, 229, 0.9)' : 'rgba(107, 114, 128, 0.9)',
+                                                color: '#ffffff',
+                                                boxShadow: '0 2px 4px rgba(0,0,0,0.1)'
+                                            }}>
+                                                {(m.geofence?.name || m.site?.name || m.cluster?.name) || '⚠️ Unassigned'}
+                                            </span>
+                                        </div>
+                                        <div className="media-card-body" style={{ padding: '12px' }}>
+                                            <div className="media-card-title" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                                <span style={{ fontWeight: 600 }}>{m.userName}</span>
+                                                <button 
+                                                    onClick={() => downloadWithWatermark(
+                                                        m.cloudinaryUrl || getFullUrl(m.filePath), 
+                                                        `geotagged_${m.id}.jpg`, 
+                                                        [
+                                                            `Uploaded by: ${m.userName}`, 
+                                                            `Cluster Group: ${m.cluster ? m.cluster.name : 'Unassigned'}`,
+                                                            `Date: ${formatDate(m.timestamp, true)}`, 
+                                                            `Location: ${m.address || 'Unknown'}`
+                                                        ]
+                                                    )} 
+                                                    className="btn btn-outline" 
+                                                    style={{ padding: '4px 8px', fontSize: '12px' }} 
+                                                    title="Download with GPS Data"
+                                                >
+                                                    <i className="fa-solid fa-download"></i>
+                                                </button>
+                                            </div>
+                                            <div className="media-card-meta" style={{ marginTop: '6px', fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
+                                                <i className="fa-solid fa-clock"></i> {formatDate(m.timestamp, true)}<br />
+                                                <i className="fa-solid fa-location-dot" style={{ marginTop: '4px' }}></i> {m.address || 'Location unknown'}
+                                            </div>
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+
+                            {/* Pagination */}
+                            {totalItems > 0 && (
+                                <div className="glass" style={{
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    justifyContent: 'flex-end',
+                                    padding: '14px 24px',
+                                    gap: '20px',
+                                    fontSize: '0.875rem',
+                                    color: 'var(--text-primary)',
+                                    marginTop: '10px'
+                                }}>
+                                    <span>
+                                        {startIndex + 1}–{endIndex} of {totalItems}
+                                    </span>
+                                    <div style={{ display: 'flex', gap: '8px' }}>
+                                        <button 
+                                            onClick={() => setCurrentPage(prev => Math.max(1, prev - 1))}
+                                            disabled={currentPage === 1}
+                                            style={{
+                                                border: '1px solid var(--border-glass)',
+                                                background: 'var(--input-bg)',
+                                                borderRadius: '6px',
+                                                padding: '6px 12px',
+                                                cursor: currentPage === 1 ? 'not-allowed' : 'pointer',
+                                                opacity: currentPage === 1 ? 0.5 : 1,
+                                                fontWeight: 'bold'
+                                            }}
+                                        >
+                                            &lt;
+                                        </button>
+                                        <button 
+                                            onClick={() => setCurrentPage(prev => Math.min(totalPages, prev + 1))}
+                                            disabled={currentPage === totalPages}
+                                            style={{
+                                                border: '1px solid var(--border-glass)',
+                                                background: 'var(--input-bg)',
+                                                borderRadius: '6px',
+                                                padding: '6px 12px',
+                                                cursor: currentPage === totalPages ? 'not-allowed' : 'pointer',
+                                                opacity: currentPage === totalPages ? 0.5 : 1,
+                                                fontWeight: 'bold'
+                                            }}
+                                        >
+                                            &gt;
+                                        </button>
+                                    </div>
+                                </div>
+                            )}
+                        </div>
+                    )}
+                </>
+            )}
+
+            {activeTab === 'clusters' && (
+                <div className="clustering-grid" style={{ flex: 1, minHeight: '520px', height: 'calc(100vh - 170px)', display: 'grid', gridTemplateColumns: '400px 1fr', gap: '16px' }}>
+                    {/* Left side: Cluster details list */}
+                    <div className="glass" style={{ padding: '18px', display: 'flex', flexDirection: 'column', gap: '12px', height: '100%', maxHeight: '100%', minHeight: 0, overflow: 'hidden' }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '8px' }}>
+                            <h3 style={{ margin: 0, fontSize: '1rem', fontWeight: 700 }}>
+                                Dynamically Grouped Clusters ({clusters.length})
+                            </h3>
+                            <button 
+                                type="button"
+                                className="btn btn-outline" 
+                                style={{ margin: 0, padding: '4px 8px', fontSize: '0.75rem', display: 'flex', alignItems: 'center', gap: '5px', borderColor: '#3b82f6', color: '#3b82f6' }}
+                                onClick={handleFitAllClusters}
+                                title="Auto-zoom map to show all cluster sites"
+                            >
+                                <i className="fa-solid fa-earth-americas"></i> Fit All Sites
+                            </button>
+                        </div>
+
+                        {/* Search Bar Input (Matches GeofenceView) */}
+                        <div style={{ position: 'relative' }}>
+                            <input 
+                                type="text"
+                                placeholder="🔍 Search site by name or coordinates..."
+                                value={clusterSearchTerm}
+                                onChange={(e) => setClusterSearchTerm(e.target.value)}
+                                style={{
+                                    width: '100%',
+                                    padding: '7px 10px 7px 30px',
+                                    borderRadius: '6px',
+                                    border: '1px solid var(--border-glass, #334155)',
+                                    background: 'rgba(0,0,0,0.06)',
+                                    color: 'var(--text-primary)',
+                                    fontSize: '12px',
+                                    outline: 'none'
+                                }}
+                            />
+                            <i className="fa-solid fa-magnifying-glass" style={{ position: 'absolute', left: '10px', top: '9px', color: '#64748b', fontSize: '11px' }}></i>
+                        </div>
+
+                        {filteredClusterList.length === 0 ? (
+                            <p style={{ color: 'var(--text-secondary)', fontSize: '0.85rem' }}>No matching photo clusters found.</p>
+                        ) : (
+                            <div 
+                                id="clusters-list-scroll"
+                                className="custom-scrollbar"
+                                style={{ display: 'flex', flexDirection: 'column', gap: '12px', overflowY: 'auto', overflowX: 'hidden', flex: 1, minHeight: 0, paddingRight: '6px' }}
+                            >
+                                {filteredClusterList.map(cl => {
+                                    const isFocused = String(cl.id) === String(focusedClusterId);
+                                    return (
+                                    <div 
+                                        key={cl.id} 
+                                        ref={el => { if (el) clusterCardRefs.current[cl.id] = el; }}
+                                        onClick={() => focusClusterOnMap(cl)}
+                                        style={{
+                                            padding: '14px 16px',
+                                            borderRadius: '8px',
+                                            background: isFocused ? 'rgba(249, 115, 22, 0.12)' : 'var(--input-bg)',
+                                            border: isFocused ? '1.5px solid #f97316' : '1px solid var(--border-glass)',
+                                            display: 'flex',
+                                            flexDirection: 'column',
+                                            gap: '10px',
+                                            boxShadow: isFocused ? '0 2px 8px rgba(249, 115, 22, 0.2)' : '0 1px 3px rgba(0,0,0,0.05)',
+                                            transition: 'all 0.2s ease',
+                                            cursor: 'pointer'
+                                        }}
+                                    >
+                                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                            <div>
+                                                {editingClusterId === cl.id ? (
+                                                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '6px' }} onClick={e => e.stopPropagation()}>
+                                                        <input 
+                                                            type="text" 
+                                                            value={editingClusterName}
+                                                            onChange={(e) => setEditingClusterName(e.target.value)}
+                                                            style={{
+                                                                padding: '4px 8px',
+                                                                borderRadius: '4px',
+                                                                border: '1px solid var(--border-glass)',
+                                                                background: 'var(--input-bg)',
+                                                                color: 'var(--text-primary)',
+                                                                fontSize: '0.85rem',
+                                                                outline: 'none',
+                                                                width: '140px'
+                                                            }}
+                                                            disabled={renameLoading}
+                                                            autoFocus
+                                                        />
+                                                        <button 
+                                                            onClick={() => handleRenameCluster(cl.id)}
+                                                            disabled={renameLoading}
+                                                            style={{
+                                                                background: '#10b981',
+                                                                color: 'white',
+                                                                border: 'none',
+                                                                borderRadius: '4px',
+                                                                padding: '4px 8px',
+                                                                cursor: 'pointer',
+                                                                fontSize: '0.8rem'
+                                                            }}
+                                                        >
+                                                            <i className="fa-solid fa-check"></i>
+                                                        </button>
+                                                        <button 
+                                                            onClick={() => { setEditingClusterId(null); setEditingClusterName(''); }}
+                                                            disabled={renameLoading}
+                                                            style={{
+                                                                background: '#ef4444',
+                                                                color: 'white',
+                                                                border: 'none',
+                                                                borderRadius: '4px',
+                                                                padding: '4px 8px',
+                                                                cursor: 'pointer',
+                                                                fontSize: '0.8rem'
+                                                            }}
+                                                        >
+                                                            <i className="fa-solid fa-xmark"></i>
+                                                        </button>
+                                                    </div>
+                                                ) : (
+                                                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                                        <h4 style={{ margin: 0, fontWeight: 700, color: isFocused ? '#f97316' : 'var(--text-primary)' }}>
+                                                            {cl.name}
+                                                        </h4>
+                                                        {isFocused && (
+                                                            <span style={{ fontSize: '11px', color: '#f97316', fontWeight: 700, marginLeft: '2px' }}>
+                                                                ● Active
+                                                            </span>
+                                                        )}
+                                                        <button 
+                                                            onClick={(e) => { e.stopPropagation(); setEditingClusterId(cl.id); setEditingClusterName(cl.name); }}
+                                                            style={{
+                                                                background: 'none',
+                                                                border: 'none',
+                                                                color: 'var(--text-secondary)',
+                                                                cursor: 'pointer',
+                                                                fontSize: '0.85rem',
+                                                                padding: '2px 4px'
+                                                            }}
+                                                            title="Rename Cluster"
+                                                        >
+                                                            <i className="fa-solid fa-pen-to-square"></i>
+                                                        </button>
+                                                    </div>
+                                                )}
+                                                <p style={{ margin: '4px 0 0 0', fontSize: '0.8rem', color: '#64748b' }}>
+                                                    Coordinates: {Number(cl.centerLatitude).toFixed(5)}, {Number(cl.centerLongitude).toFixed(5)} <br/>
+                                                    Radius: {cl.radius}m
+                                                </p>
+                                            </div>
+                                            <button 
+                                                onClick={(e) => { e.stopPropagation(); focusClusterOnMap(cl); }}
+                                                className="btn btn-outline"
+                                                style={{ 
+                                                    margin: 0,
+                                                    padding: '4px 8px', 
+                                                    fontSize: '0.75rem',
+                                                    borderColor: '#3b82f6',
+                                                    color: '#3b82f6',
+                                                    background: isFocused ? 'rgba(59, 130, 246, 0.1)' : 'var(--input-bg)',
+                                                    borderRadius: '6px',
+                                                    cursor: 'pointer',
+                                                    display: 'inline-flex',
+                                                    alignItems: 'center',
+                                                    gap: '5px'
+                                                }}
+                                                title="Focus map on site location"
+                                            >
+                                                <i className="fa-solid fa-eye"></i> View Map
+                                            </button>
+                                        </div>
+                                        
+                                        {/* Mini photos thumbnails list within the cluster */}
+                                        <div style={{ display: 'flex', flexDirection: 'column', gap: '5px', borderTop: '1px solid var(--border-glass)', paddingTop: '8px' }} onClick={e => e.stopPropagation()}>
+                                            <span style={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--text-primary)' }}>
+                                                Grouped Uploads ({cl.media ? cl.media.length : 0}):
+                                            </span>
+                                            <div style={{ display: 'flex', gap: '6px', overflowX: 'auto', paddingBottom: '4px' }}>
+                                                {cl.media && cl.media.map(m => (
+                                                    <img loading="lazy" 
+                                                        key={m.id}
+                                                        src={m.cloudinaryUrl || getFullUrl(m.filePath)}
+                                                        alt="Thumb"
+                                                        style={{ width: '45px', height: '45px', borderRadius: '4px', objectFit: 'cover', border: '1px solid var(--border-glass)', cursor: 'pointer' }}
+                                                        onClick={() => setSelectedPhoto(m)}
+                                                        title={`Uploaded by ${m.userName}`}
+                                                    />
+                                                ))}
+                                            </div>
+                                        </div>
+                                    </div>
+                                    );
+                                })}
+                            </div>
+                        )}
+                    </div>
+
+                    {/* Right side: Radius settings form & map circles */}
+                    <div className="glass" style={{ padding: '20px', display: 'flex', flexDirection: 'column', gap: '14px', height: '100%' }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                            <h3 style={{ margin: 0, fontSize: '1.05rem', fontWeight: 700 }}>Configuration & Map Preview</h3>
+                        </div>
+                        
+                        <form onSubmit={handleSaveSettings} className="glass" style={{ padding: '14px 16px', display: 'flex', flexDirection: 'column', gap: '10px', background: 'var(--bg-glass)' }}>
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                    <label style={{ fontSize: '0.85rem', fontWeight: 700, color: 'var(--text-primary)' }}>
+                                        Auto-Clustering Radius: {clusterRadius} meters
+                                    </label>
+                                </div>
+                                <p style={{ margin: 0, fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
+                                    Control how close photos must be to join an existing group. Larger values merge more photos together.
+                                </p>
+                                <input 
+                                    type="range" 
+                                    min="100" 
+                                    max="2000" 
+                                    step="50" 
+                                    value={clusterRadius} 
+                                    onChange={(e) => setClusterRadius(parseInt(e.target.value))}
+                                    style={{ width: '100%', cursor: 'pointer', marginTop: '6px' }}
+                                />
+                            </div>
+
+                            <button 
+                                type="submit" 
+                                className="btn btn-primary" 
+                                style={{ height: '36px', fontWeight: 600, fontSize: '0.85rem' }}
+                                disabled={settingsLoading}
+                            >
+                                {settingsLoading ? 'Saving Settings...' : 'Update Clustering radius'}
+                            </button>
+                        </form>
+
+                        {/* Leaflet Map with Floating Banner (Matches GeofenceView) */}
+                        <div style={{ flex: 1, minHeight: '320px', borderRadius: '10px', overflow: 'hidden', border: '1px solid var(--border-glass)', position: 'relative' }}>
+                            <div ref={mapRef} style={{ width: '100%', height: '100%', position: 'absolute', top: 0, left: 0 }} />
+                            
+                            {/* Floating banner on map (Exact match to GeofenceView) */}
+                            <div style={{
+                                position: 'absolute',
+                                bottom: '10px',
+                                left: '10px',
+                                zIndex: 1000,
+                                background: 'var(--bg-glass, #ffffff)',
+                                color: 'var(--text-primary)',
+                                border: '1px solid var(--border-glass, #e2e8f0)',
+                                padding: '6px 12px',
+                                borderRadius: '6px',
+                                fontSize: '0.75rem',
+                                fontWeight: 500,
+                                boxShadow: '0 4px 12px rgba(0,0,0,0.15)',
+                                pointerEvents: 'none',
+                                display: 'flex',
+                                alignItems: 'center',
+                                gap: '6px'
+                            }}>
+                                <i className="fa-solid fa-location-dot" style={{ color: '#2563eb' }}></i> 
+                                Click any site row in table to fly map directly onto location pin.
+                            </div>
+                        </div>
+
+                        {/* Map Legend (Matches GeofenceView) */}
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '14px', flexWrap: 'wrap', fontSize: '11px', fontWeight: 600, color: 'var(--text-muted, #64748b)', padding: '0 4px' }}>
+                            <span style={{ display: 'inline-flex', alignItems: 'center', gap: '5px' }}>
+                                <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: '#f97316' }}></span>
+                                Active Focused Site
+                            </span>
+                            <span style={{ display: 'inline-flex', alignItems: 'center', gap: '5px' }}>
+                                <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: '#2563eb' }}></span>
+                                Office Geofence
+                            </span>
+                            <span style={{ display: 'inline-flex', alignItems: 'center', gap: '5px' }}>
+                                <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: '#10b981' }}></span>
+                                Grouped Photos
+                            </span>
+                            <span style={{ display: 'inline-flex', alignItems: 'center', gap: '5px' }}>
+                                <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: '#ef4444' }}></span>
+                                Outside Geofence
+                            </span>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {selectedPhoto && (
+                <div 
+                    style={{
+                        position: 'fixed',
+                        top: 0,
+                        left: 0,
+                        width: '100vw',
+                        height: '100vh',
+                        backgroundColor: 'rgba(0, 0, 0, 0.8)',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        zIndex: 9999
+                    }}
+                    onClick={() => setSelectedPhoto(null)}
+                >
+                    <div 
+                        style={{ position: 'relative', width: '90%', maxWidth: '500px', background: 'var(--input-bg)', borderRadius: '12px', overflow: 'hidden', display: 'flex', flexDirection: 'column' }}
+                        onClick={e => e.stopPropagation()}
+                    >
+                        <button 
+                            onClick={() => setSelectedPhoto(null)}
+                            style={{
+                                position: 'absolute',
+                                top: '10px',
+                                right: '15px',
+                                background: 'rgba(0,0,0,0.5)',
+                                border: 'none',
+                                color: 'white',
+                                fontSize: '24px',
+                                cursor: 'pointer',
+                                borderRadius: '50%',
+                                width: '36px',
+                                height: '36px',
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                                zIndex: 10
+                            }}
+                        >
+                            &times;
+                        </button>
+                        
+                        <div style={{ position: 'relative', width: '100%', height: '600px', backgroundColor: '#000' }}>
+                            <img loading="lazy" 
+                                src={selectedPhoto.cloudinaryUrl || getFullUrl(selectedPhoto.filePath)} 
+                                alt="Document" 
+                                style={{ width: '100%', height: '100%', objectFit: 'contain' }} 
+                            />
+                            
+                            <div style={{
+                                position: 'absolute',
+                                bottom: 0,
+                                left: 0,
+                                right: 0,
+                                backgroundColor: 'rgba(0, 0, 0, 0.75)',
+                                padding: '16px',
+                                display: 'flex',
+                                flexDirection: 'column',
+                                color: '#fff',
+                                fontFamily: 'sans-serif',
+                                borderBottomLeftRadius: '12px',
+                                borderBottomRightRadius: '12px'
+                            }}>
+                                <div style={{
+                                    position: 'absolute',
+                                    top: '-25px',
+                                    right: '10px',
+                                    backgroundColor: 'rgba(0,0,0,0.8)',
+                                    padding: '4px 8px',
+                                    borderRadius: '6px 6px 0 0',
+                                    fontSize: '11px',
+                                    fontWeight: 'bold',
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    gap: '6px',
+                                    color: '#facc15'
+                                }}>
+                                    <i className="fa-solid fa-location-dot"></i> GPS Map Camera
+                                </div>
+                                <div style={{ fontSize: '18px', fontWeight: 'bold', marginBottom: '4px' }}>
+                                    {selectedPhoto.address ? selectedPhoto.address.split(',')[0] : 'Unknown'} 🇮🇳
+                                </div>
+                                <div style={{ fontSize: '13px', color: '#e2e8f0', marginBottom: '8px', lineHeight: '1.4' }}>
+                                    {selectedPhoto.address || 'Address not available'}
+                                </div>
+                                <div style={{ fontSize: '11px', color: '#cbd5e1', marginBottom: '4px' }}>
+                                    Lat {selectedPhoto.latitude ? parseFloat(selectedPhoto.latitude).toFixed(5) : 'N/A'}° Long {selectedPhoto.longitude ? parseFloat(selectedPhoto.longitude).toFixed(5) : 'N/A'}°
+                                </div>
+                                <div style={{ fontSize: '11px', color: '#cbd5e1', marginBottom: '4px' }}>
+                                    {new Date(Number(selectedPhoto.timestamp)).toLocaleString('en-US', {weekday: 'long', day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute:'2-digit'})}
+                                </div>
+                                <div style={{ fontSize: '11px', color: '#facc15', marginTop: '4px', display: 'flex', justifyContent: 'space-between' }}>
+                                    <span>Uploaded by: {(() => {
+                                        const { empCode, empName } = getEmployeeDisplayInfo(selectedPhoto);
+                                        return `${empName} (${empCode})`;
+                                    })()}</span>
+                                    <span>Cluster: {selectedPhoto.cluster ? selectedPhoto.cluster.name : '⚠️ Unassigned'}</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )}
+        </div>
+    );
+}
